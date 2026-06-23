@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Origami Folder</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      min-height: 100vh;
+      background: #c4d8e0;
+      background-image:
+        radial-gradient(ellipse at 15% 15%, rgba(255,255,255,0.45) 0%, transparent 55%),
+        radial-gradient(ellipse at 85% 85%, rgba(80,120,145,0.35) 0%, transparent 55%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    h1 {
+      font-size: 1.85rem;
+      font-weight: 600;
+      color: #1a3a4a;
+      letter-spacing: 0.04em;
+    }
+
+    .sub {
+      text-align: center;
+      color: #4a7080;
+      font-size: 0.87rem;
+      margin-top: 3px;
+    }
+
+    canvas {
+      display: block;
+      border-radius: 10px;
+      box-shadow: 0 8px 36px rgba(0,40,80,0.18);
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    button {
+      padding: 9px 26px;
+      background: #2870a0;
+      color: #fff;
+      border: none;
+      border-radius: 7px;
+      cursor: pointer;
+      font-size: 14.5px;
+      font-weight: 500;
+      letter-spacing: 0.03em;
+      transition: background 0.15s, transform 0.1s;
+    }
+    button:hover  { background: #1a5080; }
+    button:active { transform: scale(0.96); }
+
+    .hint { color: #4a6878; font-size: 13px; }
+
+    .ver {
+      position: fixed;
+      bottom: 10px;
+      right: 14px;
+      font-size: 11px;
+      color: #7a9aaa;
+    }
+  </style>
+</head>
+<body>
+
+<div>
+  <h1>Origami Folder</h1>
+  <p class="sub">Click and drag to fold the paper</p>
+</div>
+
+<canvas id="c" width="560" height="560"></canvas>
+
+<div class="controls">
+  <button id="restart">↺ Restart</button>
+  <span class="hint">Drag any point to where you want it to land</span>
+</div>
+
+<div class="ver">v1.0.0</div>
+
+<script>
+const cv = document.getElementById('c');
+const cx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+
+const PS = 320;               // paper size
+const OX = (W - PS) / 2;     // paper left
+const OY = (H - PS) / 2;     // paper top
+
+let layers = [];  // [{polygon:[{x,y}...], isFront:bool}]
+let drag = false;
+let p0 = null, p1 = null;  // drag start / current
+
+/* ── init ─────────────────────────────────────────────────── */
+function init() {
+  layers = [{
+    polygon: [
+      {x: OX,    y: OY},
+      {x: OX+PS, y: OY},
+      {x: OX+PS, y: OY+PS},
+      {x: OX,    y: OY+PS}
+    ],
+    isFront: true
+  }];
+  drag = false; p0 = p1 = null;
+  render();
+}
+
+/* ── geometry ─────────────────────────────────────────────── */
+
+// Perpendicular bisector of segment a-b as {A,B,C} (Ax+By+C=0)
+function perp(a, b) {
+  const mx = (a.x+b.x)/2, my = (a.y+b.y)/2;
+  const A = b.x-a.x, B = b.y-a.y;
+  return {A, B, C: -(A*mx + B*my)};
+}
+
+function lv(L, p) { return L.A*p.x + L.B*p.y + L.C; }
+
+// Sutherland-Hodgman clip to half-plane (lv >= 0 if keepPos)
+function clip(poly, L, keepPos) {
+  if (poly.length < 3) return [];
+  const s = keepPos ? 1 : -1;
+  const inside = p => s * lv(L, p) >= -1e-7;
+  const xsect = (p, q) => {
+    const vp = lv(L,p), vq = lv(L,q), t = vp/(vp-vq);
+    return {x: p.x+t*(q.x-p.x), y: p.y+t*(q.y-p.y)};
+  };
+  const out = [];
+  for (let i = 0; i < poly.length; i++) {
+    const c = poly[i], n = poly[(i+1)%poly.length];
+    const ci = inside(c), ni = inside(n);
+    if (ci) out.push({...c});
+    if (ci !== ni) out.push(xsect(c, n));
+  }
+  return out;
+}
+
+function reflPt(p, L) {
+  const d2 = L.A*L.A + L.B*L.B;
+  const v  = lv(L, p);
+  return {x: p.x - 2*L.A*v/d2, y: p.y - 2*L.B*v/d2};
+}
+
+function reflPoly(poly, L) { return poly.map(p => reflPt(p, L)); }
+
+function area(poly) {
+  let a = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const j = (i+1)%poly.length;
+    a += poly[i].x*poly[j].y - poly[j].x*poly[i].y;
+  }
+  return Math.abs(a)/2;
+}
+
+function inPoly(pt, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length-1; i < poly.length; j = i++) {
+    const xi=poly[i].x, yi=poly[i].y, xj=poly[j].x, yj=poly[j].y;
+    if (((yi > pt.y) !== (yj > pt.y)) && pt.x < (xj-xi)*(pt.y-yi)/(yj-yi)+xi)
+      inside = !inside;
+  }
+  return inside;
+}
+
+function onPaper(pt) { return layers.some(l => inPoly(pt, l.polygon)); }
+
+/* ── fold ─────────────────────────────────────────────────── */
+function doFold(a, b) {
+  if (Math.hypot(b.x-a.x, b.y-a.y) < 14) return;
+  const L = perp(a, b);
+  // a is always on the negative side of its own perpendicular bisector
+  const keep = [], folds = [];
+  for (const ly of layers) {
+    const sp = clip(ly.polygon, L, true);   // positive side stays
+    const fp = clip(ly.polygon, L, false);  // negative side (a's side) folds
+    if (area(sp) > 0.5) keep.push({polygon: sp, isFront:  ly.isFront});
+    if (area(fp) > 0.5) folds.push({polygon: reflPoly(fp, L), isFront: !ly.isFront});
+  }
+  // Folded parts land on top; their stack order reverses (bottom becomes top)
+  layers = [...keep, ...folds.reverse()];
+  render();
+}
+
+/* ── render ───────────────────────────────────────────────── */
+function drawPoly(poly, fill, stroke, lw) {
+  if (poly.length < 3) return;
+  cx.beginPath();
+  cx.moveTo(poly[0].x, poly[0].y);
+  for (let i = 1; i < poly.length; i++) cx.lineTo(poly[i].x, poly[i].y);
+  cx.closePath();
+  if (fill)   { cx.fillStyle   = fill;   cx.fill(); }
+  if (stroke) { cx.strokeStyle = stroke; cx.lineWidth = lw || 1.5; cx.stroke(); }
+}
+
+// Returns two far endpoints of the fold line across the canvas
+function foldSeg(L) {
+  let px, py;
+  if (Math.abs(L.B) > 1e-8) { px = W/2; py = -(L.A*px + L.C)/L.B; }
+  else                       { py = H/2; px = -(L.B*py + L.C)/L.A; }
+  const mag = Math.hypot(L.A, L.B);
+  const dx = -L.B/mag, dy = L.A/mag;
+  return [
+    {x: px - dx*900, y: py - dy*900},
+    {x: px + dx*900, y: py + dy*900}
+  ];
+}
+
+function render() {
+  // Background
+  cx.fillStyle = '#ccdde4';
+  cx.fillRect(0, 0, W, H);
+
+  // Dot grid
+  cx.fillStyle = 'rgba(85,135,155,0.17)';
+  for (let x = 30; x < W; x += 30)
+    for (let y = 30; y < H; y += 30) {
+      cx.beginPath(); cx.arc(x, y, 1.3, 0, Math.PI*2); cx.fill();
+    }
+
+  // Paper layers (bottom to top)
+  for (let i = 0; i < layers.length; i++) {
+    const ly = layers[i];
+    const isTop = i === layers.length - 1;
+
+    cx.save();
+    if (isTop) {
+      cx.shadowColor = 'rgba(0,30,60,0.22)';
+      cx.shadowBlur  = 14;
+      cx.shadowOffsetX = 3; cx.shadowOffsetY = 5;
+    } else if (i === 0) {
+      cx.shadowColor = 'rgba(0,30,60,0.18)';
+      cx.shadowBlur  = 20;
+      cx.shadowOffsetX = 5; cx.shadowOffsetY = 8;
+    }
+
+    const fill   = ly.isFront ? (i === 0 ? '#FEFEFE' : '#F9F9F5') : '#EDE3CB';
+    const stroke = ly.isFront ? '#d4c4a8' : '#c8a870';
+    drawPoly(ly.polygon, fill, stroke, isTop ? 1.5 : 1);
+    cx.restore();
+  }
+
+  // Live drag preview
+  if (drag && p0 && p1) {
+    const dist = Math.hypot(p1.x-p0.x, p1.y-p0.y);
+    if (dist > 8) {
+      const L = perp(p0, p1);
+
+      // Ghost: where the fold will land
+      cx.save();
+      cx.globalAlpha = 0.32;
+      for (const ly of layers) {
+        const fp = clip(ly.polygon, L, false);
+        if (fp.length >= 3)
+          drawPoly(reflPoly(fp, L), ly.isFront ? '#60a8ff' : '#ffaa58', null);
+      }
+      cx.restore();
+
+      // Dashed fold line
+      const seg = foldSeg(L);
+      cx.save();
+      cx.strokeStyle = 'rgba(20,55,180,0.68)';
+      cx.lineWidth = 2;
+      cx.setLineDash([10, 6]);
+      cx.beginPath();
+      cx.moveTo(seg[0].x, seg[0].y);
+      cx.lineTo(seg[1].x, seg[1].y);
+      cx.stroke();
+      cx.setLineDash([]);
+      cx.restore();
+
+      // Drag arrow
+      const ang = Math.atan2(p1.y-p0.y, p1.x-p0.x);
+      cx.save();
+      cx.strokeStyle = 'rgba(20,55,180,0.78)';
+      cx.fillStyle   = 'rgba(20,55,180,0.78)';
+      cx.lineWidth = 2;
+      cx.beginPath(); cx.moveTo(p0.x, p0.y); cx.lineTo(p1.x, p1.y); cx.stroke();
+      cx.beginPath();
+      cx.moveTo(p1.x, p1.y);
+      cx.lineTo(p1.x - 13*Math.cos(ang-0.42), p1.y - 13*Math.sin(ang-0.42));
+      cx.lineTo(p1.x - 13*Math.cos(ang+0.42), p1.y - 13*Math.sin(ang+0.42));
+      cx.closePath(); cx.fill();
+      cx.restore();
+    }
+  }
+}
+
+/* ── input ────────────────────────────────────────────────── */
+function pos(e) {
+  const r = cv.getBoundingClientRect();
+  const sx = W/r.width, sy = H/r.height;
+  const src = e.touches ? e.touches[0] : e;
+  return {x: (src.clientX-r.left)*sx, y: (src.clientY-r.top)*sy};
+}
+
+cv.addEventListener('mousedown', e => {
+  const p = pos(e);
+  if (!onPaper(p)) return;
+  drag = true; p0 = p; p1 = p;
+  cv.style.cursor = 'grabbing';
+});
+
+cv.addEventListener('mousemove', e => {
+  const p = pos(e);
+  if (!drag) { cv.style.cursor = onPaper(p) ? 'grab' : 'default'; return; }
+  p1 = p; render();
+});
+
+cv.addEventListener('mouseup', e => {
+  if (!drag) return;
+  p1 = pos(e); doFold(p0, p1);
+  drag = false; p0 = p1 = null;
+  cv.style.cursor = 'grab';
+});
+
+cv.addEventListener('mouseleave', () => {
+  if (drag) { drag = false; p0 = p1 = null; render(); }
+});
+
+cv.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const p = pos(e); if (!onPaper(p)) return;
+  drag = true; p0 = p; p1 = p;
+}, {passive: false});
+
+cv.addEventListener('touchmove', e => {
+  e.preventDefault(); if (!drag) return;
+  p1 = pos(e); render();
+}, {passive: false});
+
+cv.addEventListener('touchend', e => {
+  e.preventDefault(); if (!drag) return;
+  doFold(p0, p1); drag = false; p0 = p1 = null;
+}, {passive: false});
+
+document.getElementById('restart').addEventListener('click', () => {
+  init(); cv.style.cursor = 'default';
+});
+
+init();
+</script>
+</body>
+</html>
