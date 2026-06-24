@@ -90,7 +90,7 @@
   <span class="hint" id="hint">Drag to fold · Right-click to mark crease · Ctrl+Z to undo</span>
 </div>
 
-<div class="ver">v1.4.1</div>
+<div class="ver">v1.4.2</div>
 
 <script>
 const cv = document.getElementById('c');
@@ -279,8 +279,70 @@ function snapStart(rawP){
   return{x:rawP.x,y:rawP.y,snapped:false,dist:Infinity,snapPt:null};
 }
 
-const SNAP_COLORS={corner:'#cc4400',mid:'#1a44cc',edge:'#007a6e',halfway:'#1a9940',angle:'#8822cc',crease:'#7733aa','crease-mid':'#7733aa',foldthrough:'#1a5aaa',default:'#1437b4'};
+const SNAP_COLORS={corner:'#cc4400',mid:'#1a44cc',edge:'#007a6e',halfway:'#1a9940',angle:'#8822cc',crease:'#7733aa','crease-mid':'#7733aa',foldthrough:'#1a5aaa',linesnap:'#0066cc',default:'#1437b4'};
 function snapCol(){return SNAP_COLORS[snap?.type]??SNAP_COLORS.default;}
+
+// Collect all notable lines (polygon edges + creases) as normalized unique equations.
+// Each line: Ax+By+C=0 with (A,B) a unit normal and a consistent orientation.
+function collectLines(){
+  const seen=new Set(),lines=[];
+  function addL(A,B,C){
+    const n=Math.sqrt(A*A+B*B); if(n<1e-9)return;
+    let a=A/n,b=B/n,c=C/n;
+    // Canonical orientation: positive A, or if A≈0 then positive B
+    if(a<-1e-5||(Math.abs(a)<1e-5&&b<0)){a=-a;b=-b;c=-c;}
+    const k=`${a.toFixed(3)},${b.toFixed(3)},${c.toFixed(1)}`;
+    if(!seen.has(k)){seen.add(k);lines.push({A:a,B:b,C:c});}
+  }
+  for(const ly of layers){
+    const poly=ly.polygon,n=poly.length;
+    for(let i=0;i<n;i++){
+      const j=(i+1)%n,a=poly[i],b=poly[j];
+      const dx=b.x-a.x,dy=b.y-a.y;
+      if(Math.hypot(dx,dy)<6)continue;
+      addL(-dy,dx,dy*a.x-dx*a.y);
+    }
+  }
+  for(const cr of creases)addL(cr.L.A,cr.L.B,cr.L.C);
+  return lines;
+}
+
+// Returns a snap if the fold would bring one notable line to lie on another.
+// Fold line = angle bisector of the two lines; p1 = reflPt(p0, bisector).
+function lineToLineSnap(pa,pb){
+  const cDX=pb.x-pa.x,cDY=pb.y-pa.y,cLen=Math.hypot(cDX,cDY);
+  if(cLen<20)return null; // need enough drag to judge direction
+  const cdx=cDX/cLen,cdy=cDY/cLen;
+  const lines=collectLines();
+  const SIN15=Math.sin(15*Math.PI/180); // 15° direction threshold
+  let best=null,bestScore=SIN15;
+
+  for(let i=0;i<lines.length;i++){
+    for(let j=i+1;j<lines.length;j++){
+      const L1=lines[i],L2=lines[j];
+      // Two angle bisectors of L1 and L2: (L1 ± L2)
+      for(const s of[1,-1]){
+        const bA=L1.A+s*L2.A,bB=L1.B+s*L2.B,bC=L1.C+s*L2.C;
+        const bN=Math.hypot(bA,bB); if(bN<1e-6)continue;
+        const Bn={A:bA/bN,B:bB/bN,C:bC/bN};
+
+        // The required p1: reflect p0 over this bisector
+        const p1s=reflPt(pa,Bn);
+        const sdx=p1s.x-pa.x,sdy=p1s.y-pa.y,sLen=Math.hypot(sdx,sdy);
+        if(sLen<14)continue;
+
+        // Direction match between drag and required snap
+        const cross=Math.abs(cdx*(sdy/sLen)-cdy*(sdx/sLen));
+        const dot=cdx*(sdx/sLen)+cdy*(sdy/sLen);
+        if(dot<0.5||cross>=bestScore)continue;
+
+        bestScore=cross;
+        best={point:p1s,type:'linesnap',label:'Line to line',L1,L2};
+      }
+    }
+  }
+  return best;
+}
 
 function applySnap(pa,pb){
   const dx=pb.x-pa.x,dy=pb.y-pa.y,len=Math.hypot(dx,dy);
@@ -312,7 +374,11 @@ function applySnap(pa,pb){
   }
   if(bestEP)return{point:bestEP,type:'edge',label:'Fold to edge'};
 
-  // 3. Fold-line-through-point snap
+  // 3. Line-to-line snap: fold brings one paper edge/crease onto another
+  const l2l=lineToLineSnap(pa,pb);
+  if(l2l)return l2l;
+
+  // 4. Fold-line-through-point snap
   // Activation: distance from current fold line to a notable point < threshold.
   // Result: keep same drag direction but adjust magnitude so fold line hits that point exactly.
   {
@@ -338,7 +404,7 @@ function applySnap(pa,pb){
     }
   }
 
-  // 4. Halfway fold
+  // 5. Halfway fold
   const deg=Math.atan2(dy,dx)*180/Math.PI,absD=Math.abs(deg),b=paperBounds();
   if(Math.min(absD,180-absD)<SNAP_DEG){
     const dest={x:2*b.mx-pa.x,y:pa.y};
@@ -349,7 +415,7 @@ function applySnap(pa,pb){
     if(Math.abs(dest.y-pa.y)>14)return{point:dest,type:'halfway',label:'Fold in half',midLine:{axis:'y',val:b.my}};
   }
 
-  // 5. Diagonal
+  // 6. Diagonal
   for(const a of[45,-45,135,-135]){
     if(Math.abs(((deg-a+540)%360)-180)<SNAP_DEG){
       const r=a*Math.PI/180;
@@ -541,6 +607,19 @@ function render(){
     cx.save();cx.globalAlpha=0.3;
     for(const ly of layers){const fp=clip(ly.polygon,L,false);if(fp.length>=3)drawPoly(reflPoly(fp,L),ly.isFront?'#60a8ff':'#ffaa58',null);}
     cx.restore();
+  }
+
+  // Line-to-line snap: show source (orange) and target (blue) lines
+  if(snap?.type==='linesnap'&&snap.L1&&snap.L2){
+    function showAlignLine(Lx,color){
+      let x0,y0,x1,y1;
+      if(Math.abs(Lx.B)>0.05){x0=-2000;y0=(-Lx.C-Lx.A*x0)/Lx.B;x1=W+2000;y1=(-Lx.C-Lx.A*x1)/Lx.B;}
+      else{x0=-Lx.C/Lx.A;y0=-2000;x1=x0;y1=H+2000;}
+      cx.save();cx.strokeStyle=color;cx.lineWidth=2;cx.setLineDash([10,6]);cx.globalAlpha=0.55;
+      cx.beginPath();cx.moveTo(x0,y0);cx.lineTo(x1,y1);cx.stroke();cx.setLineDash([]);cx.restore();
+    }
+    showAlignLine(snap.L1,'#dd5500'); // source line (orange-red)
+    showAlignLine(snap.L2,'#0088cc'); // target line (blue)
   }
 
   if(!isCrDrag&&snap?.midLine){
