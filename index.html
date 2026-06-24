@@ -90,7 +90,7 @@
   <span class="hint" id="hint">Drag to fold · Right-click to mark crease · Ctrl+Z to undo</span>
 </div>
 
-<div class="ver">v1.4.2</div>
+<div class="ver">v1.4.3</div>
 
 <script>
 const cv = document.getElementById('c');
@@ -311,29 +311,40 @@ function collectLines(){
 // Fold line = angle bisector of the two lines; p1 = reflPt(p0, bisector).
 function lineToLineSnap(pa,pb){
   const cDX=pb.x-pa.x,cDY=pb.y-pa.y,cLen=Math.hypot(cDX,cDY);
-  if(cLen<20)return null; // need enough drag to judge direction
+  if(cLen<20)return null;
   const cdx=cDX/cLen,cdy=cDY/cLen;
   const lines=collectLines();
-  const SIN15=Math.sin(15*Math.PI/180); // 15° direction threshold
-  let best=null,bestScore=SIN15;
+
+  // Tight 6° threshold — prevents false positives from the many O(n²) pairs
+  const SIN6=Math.sin(6*Math.PI/180);
+  // Only consider a line "relevant" if pa is within 40% of the paper size from it
+  const NEAR=PS*0.4;
+
+  let best=null,bestScore=SIN6;
 
   for(let i=0;i<lines.length;i++){
     for(let j=i+1;j<lines.length;j++){
       const L1=lines[i],L2=lines[j];
-      // Two angle bisectors of L1 and L2: (L1 ± L2)
+
+      // Skip nearly-parallel pairs (the halfway-fold snap handles those)
+      if(Math.abs(L1.A*L2.B-L1.B*L2.A)<0.1) continue;
+
+      // At least one line must be close to the drag origin
+      const d1=Math.abs(L1.A*pa.x+L1.B*pa.y+L1.C);
+      const d2=Math.abs(L2.A*pa.x+L2.B*pa.y+L2.C);
+      if(d1>NEAR&&d2>NEAR) continue;
+
       for(const s of[1,-1]){
         const bA=L1.A+s*L2.A,bB=L1.B+s*L2.B,bC=L1.C+s*L2.C;
         const bN=Math.hypot(bA,bB); if(bN<1e-6)continue;
         const Bn={A:bA/bN,B:bB/bN,C:bC/bN};
 
-        // The required p1: reflect p0 over this bisector
         const p1s=reflPt(pa,Bn);
-        const sdx=p1s.x-pa.x,sdy=p1s.y-pa.y,sLen=Math.hypot(sdx,sdy);
-        if(sLen<14)continue;
+        const sdx=p1s.x-pa.x,sdy=p1s.y-pa.y,sL=Math.hypot(sdx,sdy);
+        if(sL<14)continue;
 
-        // Direction match between drag and required snap
-        const cross=Math.abs(cdx*(sdy/sLen)-cdy*(sdx/sLen));
-        const dot=cdx*(sdx/sLen)+cdy*(sdy/sLen);
+        const cross=Math.abs(cdx*(sdy/sL)-cdy*(sdx/sL));
+        const dot=cdx*(sdx/sL)+cdy*(sdy/sL);
         if(dot<0.5||cross>=bestScore)continue;
 
         bestScore=cross;
