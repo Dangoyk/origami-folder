@@ -79,30 +79,33 @@
 
 <div>
   <h1>Origami Folder</h1>
-  <p class="sub">Click and drag to fold the paper</p>
+  <p class="sub">Drag to fold · Snaps to edges, corners &amp; midpoints</p>
 </div>
 
 <canvas id="c" width="560" height="560"></canvas>
 
 <div class="controls">
   <button id="restart">↺ Restart</button>
-  <span class="hint">Drag any point to where you want it to land</span>
+  <span class="hint">Drag a point · snaps to corners, edges &amp; half-folds</span>
 </div>
 
-<div class="ver">v1.0.0</div>
+<div class="ver">v1.1.0</div>
 
 <script>
 const cv = document.getElementById('c');
 const cx = cv.getContext('2d');
 const W = cv.width, H = cv.height;
 
-const PS = 320;               // paper size
-const OX = (W - PS) / 2;     // paper left
-const OY = (H - PS) / 2;     // paper top
+const PS = 320;           // paper size
+const OX = (W - PS) / 2; // paper left
+const OY = (H - PS) / 2; // paper top
 
 let layers = [];  // [{polygon:[{x,y}...], isFront:bool}]
 let drag = false;
-let p0 = null, p1 = null;  // drag start / current
+let p0   = null;  // drag start (raw)
+let p1   = null;  // drag current (raw)
+let p1s  = null;  // drag current (snapped)
+let snap = null;  // active snap info
 
 /* ── init ─────────────────────────────────────────────────── */
 function init() {
@@ -115,13 +118,13 @@ function init() {
     ],
     isFront: true
   }];
-  drag = false; p0 = p1 = null;
+  drag = false; p0 = p1 = p1s = snap = null;
   render();
 }
 
 /* ── geometry ─────────────────────────────────────────────── */
 
-// Perpendicular bisector of segment a-b as {A,B,C} (Ax+By+C=0)
+// Perpendicular bisector of a-b  →  {A,B,C}  (Ax+By+C=0)
 function perp(a, b) {
   const mx = (a.x+b.x)/2, my = (a.y+b.y)/2;
   const A = b.x-a.x, B = b.y-a.y;
@@ -135,7 +138,7 @@ function clip(poly, L, keepPos) {
   if (poly.length < 3) return [];
   const s = keepPos ? 1 : -1;
   const inside = p => s * lv(L, p) >= -1e-7;
-  const xsect = (p, q) => {
+  const xsect  = (p, q) => {
     const vp = lv(L,p), vq = lv(L,q), t = vp/(vp-vq);
     return {x: p.x+t*(q.x-p.x), y: p.y+t*(q.y-p.y)};
   };
@@ -150,8 +153,7 @@ function clip(poly, L, keepPos) {
 }
 
 function reflPt(p, L) {
-  const d2 = L.A*L.A + L.B*L.B;
-  const v  = lv(L, p);
+  const d2 = L.A*L.A + L.B*L.B, v = lv(L, p);
   return {x: p.x - 2*L.A*v/d2, y: p.y - 2*L.B*v/d2};
 }
 
@@ -178,19 +180,90 @@ function inPoly(pt, poly) {
 
 function onPaper(pt) { return layers.some(l => inPoly(pt, l.polygon)); }
 
+/* ── snapping ─────────────────────────────────────────────── */
+const SNAP_PX  = 24;  // point snap radius (canvas px)
+const SNAP_DEG = 10;  // angle snap threshold (degrees)
+
+// Returns deduplicated corners + edge midpoints of all current layers
+function snapPts() {
+  const seen = new Set();
+  const pts  = [];
+  function add(x, y, type) {
+    const key = `${Math.round(x*4)},${Math.round(y*4)}`;
+    if (!seen.has(key)) { pts.push({x, y, type}); seen.add(key); }
+  }
+  for (const ly of layers) {
+    const poly = ly.polygon, n = poly.length;
+    for (let i = 0; i < n; i++) {
+      const j = (i+1)%n;
+      add(poly[i].x, poly[i].y, 'corner');
+      add((poly[i].x+poly[j].x)/2, (poly[i].y+poly[j].y)/2, 'mid');
+    }
+  }
+  return pts;
+}
+
+// Returns {point, type, label, snapPt?} or null
+function applySnap(pa, pb) {
+  // 1 — point snap: corners and edge midpoints
+  const pts = snapPts();
+  let best = null, bestD = SNAP_PX;
+  for (const pt of pts) {
+    const d = Math.hypot(pb.x-pt.x, pb.y-pt.y);
+    if (d < bestD) { bestD = d; best = pt; }
+  }
+  if (best) {
+    return {
+      point:  {x: best.x, y: best.y},
+      type:   best.type,
+      label:  best.type === 'corner' ? 'Corner' : 'Edge midpoint',
+      snapPt: best
+    };
+  }
+
+  // 2 — angle snap: fold direction → 0 / 45 / 90 / 135°
+  const dx = pb.x-pa.x, dy = pb.y-pa.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 2) return null;
+  const deg = Math.atan2(dy, dx) * 180/Math.PI;
+  const candidates = [
+    {a:   0, label:'Fold in half'},
+    {a:  90, label:'Fold in half'},
+    {a: -90, label:'Fold in half'},
+    {a: 180, label:'Fold in half'},
+    {a:  45, label:'Diagonal fold'},
+    {a: -45, label:'Diagonal fold'},
+    {a: 135, label:'Diagonal fold'},
+    {a:-135, label:'Diagonal fold'},
+  ];
+  let bestA = null, bestDiff = SNAP_DEG;
+  for (const c of candidates) {
+    const diff = Math.abs(((deg - c.a + 540) % 360) - 180);
+    if (diff < bestDiff) { bestDiff = diff; bestA = c; }
+  }
+  if (bestA) {
+    const rad = bestA.a * Math.PI/180;
+    return {
+      point: {x: pa.x + len*Math.cos(rad), y: pa.y + len*Math.sin(rad)},
+      type:  'angle',
+      label: bestA.label
+    };
+  }
+
+  return null;
+}
+
 /* ── fold ─────────────────────────────────────────────────── */
 function doFold(a, b) {
   if (Math.hypot(b.x-a.x, b.y-a.y) < 14) return;
   const L = perp(a, b);
-  // a is always on the negative side of its own perpendicular bisector
   const keep = [], folds = [];
   for (const ly of layers) {
     const sp = clip(ly.polygon, L, true);   // positive side stays
-    const fp = clip(ly.polygon, L, false);  // negative side (a's side) folds
-    if (area(sp) > 0.5) keep.push({polygon: sp, isFront:  ly.isFront});
+    const fp = clip(ly.polygon, L, false);  // negative (a's) side folds
+    if (area(sp) > 0.5) keep.push({polygon: sp,            isFront:  ly.isFront});
     if (area(fp) > 0.5) folds.push({polygon: reflPoly(fp, L), isFront: !ly.isFront});
   }
-  // Folded parts land on top; their stack order reverses (bottom becomes top)
   layers = [...keep, ...folds.reverse()];
   render();
 }
@@ -206,7 +279,6 @@ function drawPoly(poly, fill, stroke, lw) {
   if (stroke) { cx.strokeStyle = stroke; cx.lineWidth = lw || 1.5; cx.stroke(); }
 }
 
-// Returns two far endpoints of the fold line across the canvas
 function foldSeg(L) {
   let px, py;
   if (Math.abs(L.B) > 1e-8) { px = W/2; py = -(L.A*px + L.C)/L.B; }
@@ -231,71 +303,109 @@ function render() {
       cx.beginPath(); cx.arc(x, y, 1.3, 0, Math.PI*2); cx.fill();
     }
 
-  // Paper layers (bottom to top)
+  // Paper layers (bottom → top)
   for (let i = 0; i < layers.length; i++) {
-    const ly = layers[i];
-    const isTop = i === layers.length - 1;
-
+    const ly = layers[i], isTop = i === layers.length - 1;
     cx.save();
     if (isTop) {
-      cx.shadowColor = 'rgba(0,30,60,0.22)';
-      cx.shadowBlur  = 14;
+      cx.shadowColor = 'rgba(0,30,60,0.22)'; cx.shadowBlur = 14;
       cx.shadowOffsetX = 3; cx.shadowOffsetY = 5;
     } else if (i === 0) {
-      cx.shadowColor = 'rgba(0,30,60,0.18)';
-      cx.shadowBlur  = 20;
+      cx.shadowColor = 'rgba(0,30,60,0.18)'; cx.shadowBlur = 20;
       cx.shadowOffsetX = 5; cx.shadowOffsetY = 8;
     }
-
     const fill   = ly.isFront ? (i === 0 ? '#FEFEFE' : '#F9F9F5') : '#EDE3CB';
     const stroke = ly.isFront ? '#d4c4a8' : '#c8a870';
     drawPoly(ly.polygon, fill, stroke, isTop ? 1.5 : 1);
     cx.restore();
   }
 
-  // Live drag preview
-  if (drag && p0 && p1) {
-    const dist = Math.hypot(p1.x-p0.x, p1.y-p0.y);
-    if (dist > 8) {
-      const L = perp(p0, p1);
-
-      // Ghost: where the fold will land
+  // Idle: snap-hint circles on corners and edge midpoints
+  if (!drag) {
+    for (const pt of snapPts()) {
+      const corner = pt.type === 'corner';
       cx.save();
-      cx.globalAlpha = 0.32;
-      for (const ly of layers) {
-        const fp = clip(ly.polygon, L, false);
-        if (fp.length >= 3)
-          drawPoly(reflPoly(fp, L), ly.isFront ? '#60a8ff' : '#ffaa58', null);
-      }
-      cx.restore();
-
-      // Dashed fold line
-      const seg = foldSeg(L);
-      cx.save();
-      cx.strokeStyle = 'rgba(20,55,180,0.68)';
-      cx.lineWidth = 2;
-      cx.setLineDash([10, 6]);
-      cx.beginPath();
-      cx.moveTo(seg[0].x, seg[0].y);
-      cx.lineTo(seg[1].x, seg[1].y);
-      cx.stroke();
-      cx.setLineDash([]);
-      cx.restore();
-
-      // Drag arrow
-      const ang = Math.atan2(p1.y-p0.y, p1.x-p0.x);
-      cx.save();
-      cx.strokeStyle = 'rgba(20,55,180,0.78)';
-      cx.fillStyle   = 'rgba(20,55,180,0.78)';
-      cx.lineWidth = 2;
-      cx.beginPath(); cx.moveTo(p0.x, p0.y); cx.lineTo(p1.x, p1.y); cx.stroke();
-      cx.beginPath();
-      cx.moveTo(p1.x, p1.y);
-      cx.lineTo(p1.x - 13*Math.cos(ang-0.42), p1.y - 13*Math.sin(ang-0.42));
-      cx.lineTo(p1.x - 13*Math.cos(ang+0.42), p1.y - 13*Math.sin(ang+0.42));
-      cx.closePath(); cx.fill();
+      cx.strokeStyle = corner ? 'rgba(220,95,40,0.45)' : 'rgba(40,105,220,0.4)';
+      cx.fillStyle   = corner ? 'rgba(220,95,40,0.12)' : 'rgba(40,105,220,0.1)';
+      cx.lineWidth = 1.5;
+      cx.beginPath(); cx.arc(pt.x, pt.y, corner ? 7 : 5.5, 0, Math.PI*2);
+      cx.fill(); cx.stroke();
       cx.restore();
     }
+    return;
+  }
+
+  // Drag preview — use snapped destination (p1s) for all fold visuals
+  const cur = p1s || p1;
+  if (!p0 || !cur) return;
+  const dist = Math.hypot(cur.x-p0.x, cur.y-p0.y);
+  if (dist < 8) return;
+
+  const L       = perp(p0, cur);
+  const snapped = !!snap;
+  const foldCol  = snapped ? 'rgba(195,70,10,0.82)' : 'rgba(20,55,180,0.7)';
+  const arrowCol = snapped ? 'rgba(195,70,10,0.9)'  : 'rgba(20,55,180,0.82)';
+
+  // Ghost: semi-transparent preview of where the fold lands
+  cx.save();
+  cx.globalAlpha = 0.3;
+  for (const ly of layers) {
+    const fp = clip(ly.polygon, L, false);
+    if (fp.length >= 3)
+      drawPoly(reflPoly(fp, L), ly.isFront ? '#60a8ff' : '#ffaa58', null);
+  }
+  cx.restore();
+
+  // Dashed fold line
+  const seg = foldSeg(L);
+  cx.save();
+  cx.strokeStyle = foldCol;
+  cx.lineWidth = snapped ? 2.5 : 2;
+  cx.setLineDash([10, 6]);
+  cx.beginPath(); cx.moveTo(seg[0].x, seg[0].y); cx.lineTo(seg[1].x, seg[1].y);
+  cx.stroke(); cx.setLineDash([]);
+  cx.restore();
+
+  // Arrow p0 → cur
+  const ang = Math.atan2(cur.y-p0.y, cur.x-p0.x);
+  cx.save();
+  cx.strokeStyle = arrowCol; cx.fillStyle = arrowCol; cx.lineWidth = 2;
+  cx.beginPath(); cx.moveTo(p0.x, p0.y); cx.lineTo(cur.x, cur.y); cx.stroke();
+  cx.beginPath();
+  cx.moveTo(cur.x, cur.y);
+  cx.lineTo(cur.x - 13*Math.cos(ang-0.42), cur.y - 13*Math.sin(ang-0.42));
+  cx.lineTo(cur.x - 13*Math.cos(ang+0.42), cur.y - 13*Math.sin(ang+0.42));
+  cx.closePath(); cx.fill();
+  cx.restore();
+
+  // Active snap indicator: pulsing ring at the snapped target point
+  if (snap?.snapPt) {
+    const {x, y, type} = snap.snapPt;
+    const col = type === 'corner' ? '#cc4400' : '#1a44cc';
+    cx.save();
+    cx.strokeStyle = col; cx.fillStyle = col + '28'; cx.lineWidth = 2.5;
+    cx.beginPath(); cx.arc(x, y, 12, 0, Math.PI*2);
+    cx.fill(); cx.stroke();
+    // Inner dot
+    cx.fillStyle = col;
+    cx.beginPath(); cx.arc(x, y, 3.5, 0, Math.PI*2); cx.fill();
+    cx.restore();
+  }
+
+  // Snap label badge near the cursor
+  if (snap?.label) {
+    cx.save();
+    cx.font = 'bold 12px Segoe UI, sans-serif';
+    const tw = cx.measureText(snap.label).width;
+    const lx = cur.x + 16, ly2 = cur.y - 12;
+    cx.fillStyle = snapped ? 'rgba(100,30,0,0.88)' : 'rgba(10,30,120,0.85)';
+    const pad = 5;
+    cx.beginPath();
+    cx.roundRect(lx - pad, ly2 - 13, tw + pad*2, 20, 4);
+    cx.fill();
+    cx.fillStyle = '#fff';
+    cx.fillText(snap.label, lx, ly2);
+    cx.restore();
   }
 }
 
@@ -307,44 +417,51 @@ function pos(e) {
   return {x: (src.clientX-r.left)*sx, y: (src.clientY-r.top)*sy};
 }
 
+function updateSnap() {
+  snap = applySnap(p0, p1);
+  p1s  = snap ? snap.point : p1;
+}
+
 cv.addEventListener('mousedown', e => {
   const p = pos(e);
   if (!onPaper(p)) return;
-  drag = true; p0 = p; p1 = p;
+  drag = true; p0 = p; p1 = p; p1s = p; snap = null;
   cv.style.cursor = 'grabbing';
 });
 
 cv.addEventListener('mousemove', e => {
   const p = pos(e);
   if (!drag) { cv.style.cursor = onPaper(p) ? 'grab' : 'default'; return; }
-  p1 = p; render();
+  p1 = p; updateSnap(); render();
 });
 
 cv.addEventListener('mouseup', e => {
   if (!drag) return;
-  p1 = pos(e); doFold(p0, p1);
-  drag = false; p0 = p1 = null;
+  p1 = pos(e); updateSnap();
+  doFold(p0, p1s);
+  drag = false; p0 = p1 = p1s = snap = null;
   cv.style.cursor = 'grab';
 });
 
 cv.addEventListener('mouseleave', () => {
-  if (drag) { drag = false; p0 = p1 = null; render(); }
+  if (drag) { drag = false; p0 = p1 = p1s = snap = null; render(); }
 });
 
 cv.addEventListener('touchstart', e => {
   e.preventDefault();
   const p = pos(e); if (!onPaper(p)) return;
-  drag = true; p0 = p; p1 = p;
+  drag = true; p0 = p; p1 = p; p1s = p; snap = null;
 }, {passive: false});
 
 cv.addEventListener('touchmove', e => {
   e.preventDefault(); if (!drag) return;
-  p1 = pos(e); render();
+  p1 = pos(e); updateSnap(); render();
 }, {passive: false});
 
 cv.addEventListener('touchend', e => {
   e.preventDefault(); if (!drag) return;
-  doFold(p0, p1); drag = false; p0 = p1 = null;
+  updateSnap(); doFold(p0, p1s);
+  drag = false; p0 = p1 = p1s = snap = null;
 }, {passive: false});
 
 document.getElementById('restart').addEventListener('click', () => {
