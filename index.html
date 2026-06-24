@@ -23,31 +23,13 @@
       -webkit-user-select: none;
     }
 
-    h1 {
-      font-size: 1.85rem;
-      font-weight: 600;
-      color: #1a3a4a;
-      letter-spacing: 0.04em;
-    }
+    h1 { font-size: 1.85rem; font-weight: 600; color: #1a3a4a; letter-spacing: 0.04em; }
 
-    .sub {
-      text-align: center;
-      color: #4a7080;
-      font-size: 0.87rem;
-      margin-top: 3px;
-    }
+    .sub { text-align: center; color: #4a7080; font-size: 0.87rem; margin-top: 3px; }
 
-    canvas {
-      display: block;
-      border-radius: 10px;
-      box-shadow: 0 8px 36px rgba(0,40,80,0.18);
-    }
+    canvas { display: block; border-radius: 10px; box-shadow: 0 8px 36px rgba(0,40,80,0.18); }
 
-    .controls {
-      display: flex;
-      align-items: center;
-      gap: 20px;
-    }
+    .controls { display: flex; align-items: center; gap: 20px; }
 
     button {
       padding: 9px 26px;
@@ -63,65 +45,68 @@
     }
     button:hover   { background: #1a5080; }
     button:active  { transform: scale(0.96); }
-    button:disabled {
-      background: #90b0c4;
-      cursor: default;
-      opacity: 0.7;
-      transform: none;
-    }
+    button:disabled { background: #90b0c4; cursor: default; opacity: 0.7; transform: none; }
+
+    button.accent       { background: #1e7855; }
+    button.accent:hover { background: #145c3e; }
 
     .hint { color: #4a6878; font-size: 13px; }
 
-    .ver {
-      position: fixed;
-      bottom: 10px;
-      right: 14px;
-      font-size: 11px;
-      color: #7a9aaa;
-    }
+    .ver { position: fixed; bottom: 10px; right: 14px; font-size: 11px; color: #7a9aaa; }
   </style>
 </head>
 <body>
 
 <div>
   <h1>Origami Folder</h1>
-  <p class="sub">Drag to fold · Snaps to edges, corners &amp; midpoints</p>
+  <p class="sub" id="subtitle">Drag to fold · Snaps to edges, corners &amp; midpoints</p>
 </div>
 
 <canvas id="c" width="560" height="560"></canvas>
 
 <div class="controls">
-  <button id="undo" disabled>↩ Undo</button>
-  <button id="restart">↺ Restart</button>
-  <span class="hint">Drag to fold · Ctrl+Z to undo · snaps to corners, edges &amp; halves</span>
+  <span id="fold-btns" style="display:flex;gap:10px">
+    <button id="undo" disabled>↩ Undo</button>
+    <button id="restart">↺ Restart</button>
+    <button id="view3d" class="accent">View in 3D ↗</button>
+  </span>
+  <button id="back-fold" style="display:none">← Back to folding</button>
+  <span class="hint" id="hint">Drag to fold · Ctrl+Z to undo · snaps to corners, edges &amp; halves</span>
 </div>
 
-<div class="ver">v1.2.1</div>
+<div class="ver">v1.3.0</div>
 
 <script>
 const cv = document.getElementById('c');
 const cx = cv.getContext('2d');
 const W = cv.width, H = cv.height;
+const PS = 320, OX = (W-PS)/2, OY = (H-PS)/2;
 
-const PS = 320;
-const OX = (W - PS) / 2;
-const OY = (H - PS) / 2;
-
+/* ── state ────────────────────────────────────────────────── */
 let layers  = [];
-let history = [];  // undo stack — each entry is a deep-cloned layers array
+let history = [];
 let drag    = false;
-let p0 = null, p1 = null, p1s = null, snap = null, hoverPt = null;
+let p0=null, p1=null, p1s=null, snap=null, hoverPt=null;
 
-const undoBtn = document.getElementById('undo');
+let mode     = 'fold';   // 'fold' | 'view'
+let rotX     = -0.38;   // 3D tilt (radians)
+let rotY     =  0.42;
+let viewDrag = false;
+let vp0      = null;
+let animId   = null;
+
+const undoBtn    = document.getElementById('undo');
+const foldBtns   = document.getElementById('fold-btns');
+const backBtn    = document.getElementById('back-fold');
+const hintEl     = document.getElementById('hint');
+const subtitleEl = document.getElementById('subtitle');
 
 /* ── init ─────────────────────────────────────────────────── */
 function init() {
-  layers = [{
-    polygon: [{x:OX,y:OY},{x:OX+PS,y:OY},{x:OX+PS,y:OY+PS},{x:OX,y:OY+PS}],
-    isFront: true
-  }];
+  layers = [{polygon:[{x:OX,y:OY},{x:OX+PS,y:OY},{x:OX+PS,y:OY+PS},{x:OX,y:OY+PS}],isFront:true}];
   history = [];
-  drag = false; p0 = p1 = p1s = snap = hoverPt = null;
+  drag = false; p0=p1=p1s=snap=hoverPt=null;
+  if (mode === 'view') exitView();
   syncUndoBtn();
   render();
 }
@@ -133,40 +118,39 @@ function cloneLayers() {
 }
 
 /* ── geometry ─────────────────────────────────────────────── */
-function perp(a, b) {
+function perp(a,b) {
   const mx=(a.x+b.x)/2, my=(a.y+b.y)/2, A=b.x-a.x, B=b.y-a.y;
   return {A, B, C:-(A*mx+B*my)};
 }
-function lv(L, p) { return L.A*p.x + L.B*p.y + L.C; }
+function lv(L,p) { return L.A*p.x + L.B*p.y + L.C; }
 
-function clip(poly, L, keepPos) {
-  if (poly.length < 3) return [];
-  const s = keepPos ? 1 : -1;
-  const inside = p => s*lv(L,p) >= -1e-7;
-  const xsect  = (p,q) => { const vp=lv(L,p),vq=lv(L,q),t=vp/(vp-vq); return {x:p.x+t*(q.x-p.x),y:p.y+t*(q.y-p.y)}; };
-  const out = [];
-  for (let i=0; i<poly.length; i++) {
-    const c=poly[i], n=poly[(i+1)%poly.length], ci=inside(c), ni=inside(n);
+function clip(poly,L,keepPos) {
+  if (poly.length<3) return [];
+  const s=keepPos?1:-1, inside=p=>s*lv(L,p)>=-1e-7;
+  const xsect=(p,q)=>{const vp=lv(L,p),vq=lv(L,q),t=vp/(vp-vq);return{x:p.x+t*(q.x-p.x),y:p.y+t*(q.y-p.y)};};
+  const out=[];
+  for (let i=0;i<poly.length;i++) {
+    const c=poly[i],n=poly[(i+1)%poly.length],ci=inside(c),ni=inside(n);
     if (ci) out.push({...c});
     if (ci!==ni) out.push(xsect(c,n));
   }
   return out;
 }
 
-function reflPt(p, L) { const d2=L.A*L.A+L.B*L.B,v=lv(L,p); return {x:p.x-2*L.A*v/d2,y:p.y-2*L.B*v/d2}; }
-function reflPoly(poly, L) { return poly.map(p=>reflPt(p,L)); }
+function reflPt(p,L) { const d2=L.A*L.A+L.B*L.B,v=lv(L,p); return{x:p.x-2*L.A*v/d2,y:p.y-2*L.B*v/d2}; }
+function reflPoly(poly,L) { return poly.map(p=>reflPt(p,L)); }
 
 function area(poly) {
   let a=0;
-  for (let i=0; i<poly.length; i++) { const j=(i+1)%poly.length; a+=poly[i].x*poly[j].y-poly[j].x*poly[i].y; }
+  for (let i=0;i<poly.length;i++){const j=(i+1)%poly.length;a+=poly[i].x*poly[j].y-poly[j].x*poly[i].y;}
   return Math.abs(a)/2;
 }
 
-function inPoly(pt, poly) {
+function inPoly(pt,poly) {
   let inside=false;
-  for (let i=0,j=poly.length-1; i<poly.length; j=i++) {
+  for (let i=0,j=poly.length-1;i<poly.length;j=i++) {
     const xi=poly[i].x,yi=poly[i].y,xj=poly[j].x,yj=poly[j].y;
-    if (((yi>pt.y)!==(yj>pt.y)) && pt.x<(xj-xi)*(pt.y-yi)/(yj-yi)+xi) inside=!inside;
+    if (((yi>pt.y)!==(yj>pt.y))&&pt.x<(xj-xi)*(pt.y-yi)/(yj-yi)+xi) inside=!inside;
   }
   return inside;
 }
@@ -177,143 +161,104 @@ function onPaper(pt) { return layers.some(l=>inPoly(pt,l.polygon)); }
 function paperBounds() {
   let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
   for (const ly of layers) for (const p of ly.polygon) {
-    if (p.x<x0) x0=p.x; if (p.x>x1) x1=p.x;
-    if (p.y<y0) y0=p.y; if (p.y>y1) y1=p.y;
+    if(p.x<x0)x0=p.x; if(p.x>x1)x1=p.x; if(p.y<y0)y0=p.y; if(p.y>y1)y1=p.y;
   }
-  return {x0,x1,y0,y1,mx:(x0+x1)/2,my:(y0+y1)/2};
+  return{x0,x1,y0,y1,mx:(x0+x1)/2,my:(y0+y1)/2};
 }
 
 /* ── snapping ─────────────────────────────────────────────── */
-const SNAP_PX      = 24;  // corner / midpoint snap radius (px)
-const SNAP_EDGE_PX = 14;  // edge snap radius (px)
-const SNAP_DEG     = 12;  // angle threshold for halfway / diagonal snaps
+const SNAP_PX=24, SNAP_EDGE_PX=14, SNAP_DEG=12;
 
-// Deduplicated corners + edge midpoints across all layers
 function snapPts() {
-  const seen=new Set(), pts=[];
+  const seen=new Set(),pts=[];
   function add(x,y,type) {
-    const key=`${Math.round(x*4)},${Math.round(y*4)}`;
-    if (!seen.has(key)) { pts.push({x,y,type}); seen.add(key); }
+    const k=`${Math.round(x*4)},${Math.round(y*4)}`;
+    if (!seen.has(k)){pts.push({x,y,type});seen.add(k);}
   }
   for (const ly of layers) {
-    const poly=ly.polygon, n=poly.length;
-    for (let i=0; i<n; i++) {
+    const poly=ly.polygon,n=poly.length;
+    for (let i=0;i<n;i++) {
       const j=(i+1)%n;
-      add(poly[i].x, poly[i].y, 'corner');
-      add((poly[i].x+poly[j].x)/2, (poly[i].y+poly[j].y)/2, 'mid');
+      add(poly[i].x,poly[i].y,'corner');
+      add((poly[i].x+poly[j].x)/2,(poly[i].y+poly[j].y)/2,'mid');
     }
   }
   return pts;
 }
 
-// Closest point on segment a-b to p
-function closestOnSeg(p, a, b) {
+function closestOnSeg(p,a,b) {
   const dx=b.x-a.x,dy=b.y-a.y,len2=dx*dx+dy*dy;
-  if (len2<1e-9) return {x:a.x,y:a.y};
+  if (len2<1e-9) return{x:a.x,y:a.y};
   const t=Math.max(0,Math.min(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/len2));
-  return {x:a.x+t*dx,y:a.y+t*dy};
+  return{x:a.x+t*dx,y:a.y+t*dy};
 }
 
-// Snap the drag START point to the nearest corner/midpoint.
-// Returns {x, y, snapped, dist} — snapped=true means p0 was locked to a snap target.
 function snapStart(rawP) {
-  const pts=snapPts();
-  let best=null, bestD=SNAP_PX;
-  for (const pt of pts) {
-    const d=Math.hypot(rawP.x-pt.x,rawP.y-pt.y);
-    if (d<bestD) { bestD=d; best=pt; }
-  }
-  if (best) return {x:best.x, y:best.y, snapped:true,  dist:bestD, snapPt:best};
-  return       {x:rawP.x,  y:rawP.y,  snapped:false, dist:Infinity, snapPt:null};
+  const pts=snapPts(); let best=null,bestD=SNAP_PX;
+  for (const pt of pts){const d=Math.hypot(rawP.x-pt.x,rawP.y-pt.y);if(d<bestD){bestD=d;best=pt;}}
+  if (best) return{x:best.x,y:best.y,snapped:true,dist:bestD,snapPt:best};
+  return{x:rawP.x,y:rawP.y,snapped:false,dist:Infinity,snapPt:null};
 }
 
-// Per-type accent colours for fold line, arrow, badge, and indicator rings
-const SNAP_COLORS = {
-  corner:  '#cc4400',
-  mid:     '#1a44cc',
-  edge:    '#007a6e',
-  halfway: '#1a9940',
-  angle:   '#8822cc',
-  default: '#1437b4',
-};
+const SNAP_COLORS={corner:'#cc4400',mid:'#1a44cc',edge:'#007a6e',halfway:'#1a9940',angle:'#8822cc',default:'#1437b4'};
 function snapCol() { return SNAP_COLORS[snap?.type] ?? SNAP_COLORS.default; }
 
-// Returns {point, type, label, snapPt?, midLine?} or null
-function applySnap(pa, pb) {
-  const dx=pb.x-pa.x, dy=pb.y-pa.y, len=Math.hypot(dx,dy);
-  if (len < 2) return null;
+function applySnap(pa,pb) {
+  const dx=pb.x-pa.x,dy=pb.y-pa.y,len=Math.hypot(dx,dy);
+  if (len<2) return null;
+  const pts=snapPts();
 
-  const pts = snapPts();
-
-  /* ── 1. Corner / midpoint snap ─────────────────────────── */
-  let best=null, bestD=SNAP_PX;
-  for (const pt of pts) {
-    const d=Math.hypot(pb.x-pt.x,pb.y-pt.y);
-    if (d<bestD) { bestD=d; best=pt; }
-  }
+  // 1. Corner / midpoint
+  let best=null,bestD=SNAP_PX;
+  for (const pt of pts){const d=Math.hypot(pb.x-pt.x,pb.y-pt.y);if(d<bestD){bestD=d;best=pt;}}
   if (best) {
-    // Detect corner-to-corner when drag starts at a corner too
-    const fromCorner = pts.some(p=>p.type==='corner' && Math.hypot(pa.x-p.x,pa.y-p.y)<2);
-    const label = (fromCorner && best.type==='corner') ? 'Corner to corner'
-                : best.type==='corner' ? 'Fold to corner' : 'Edge midpoint';
-    return {point:{x:best.x,y:best.y}, type:best.type, label, snapPt:best};
+    const fromCorner=pts.some(p=>p.type==='corner'&&Math.hypot(pa.x-p.x,pa.y-p.y)<2);
+    const label=(fromCorner&&best.type==='corner')?'Corner to corner':best.type==='corner'?'Fold to corner':'Edge midpoint';
+    return{point:{x:best.x,y:best.y},type:best.type,label,snapPt:best};
   }
 
-  /* ── 2. Edge snap (any point on any polygon edge) ──────── */
-  let bestEP=null, bestED=SNAP_EDGE_PX;
+  // 2. Edge snap
+  let bestEP=null,bestED=SNAP_EDGE_PX;
   for (const ly of layers) {
-    const poly=ly.polygon, n=poly.length;
-    for (let i=0; i<n; i++) {
+    const poly=ly.polygon,n=poly.length;
+    for (let i=0;i<n;i++) {
       const ep=closestOnSeg(pb,poly[i],poly[(i+1)%n]);
       const d=Math.hypot(pb.x-ep.x,pb.y-ep.y);
-      // Skip if it's essentially a corner or midpoint (already handled above)
-      const near=pts.some(p=>Math.hypot(ep.x-p.x,ep.y-p.y)<5);
-      if (d<bestED && !near) { bestED=d; bestEP={...ep}; }
+      if (d<bestED&&!pts.some(p=>Math.hypot(ep.x-p.x,ep.y-p.y)<5)){bestED=d;bestEP={...ep};}
     }
   }
-  if (bestEP) {
-    return {point:bestEP, type:'edge', label:'Fold to edge'};
+  if (bestEP) return{point:bestEP,type:'edge',label:'Fold to edge'};
+
+  // 3. Halfway fold
+  const deg=Math.atan2(dy,dx)*180/Math.PI,absD=Math.abs(deg),b=paperBounds();
+  if (Math.min(absD,180-absD)<SNAP_DEG){
+    const dest={x:2*b.mx-pa.x,y:pa.y};
+    if(Math.abs(dest.x-pa.x)>14) return{point:dest,type:'halfway',label:'Fold in half',midLine:{axis:'x',val:b.mx}};
+  }
+  if (Math.abs(absD-90)<SNAP_DEG){
+    const dest={x:pa.x,y:2*b.my-pa.y};
+    if(Math.abs(dest.y-pa.y)>14) return{point:dest,type:'halfway',label:'Fold in half',midLine:{axis:'y',val:b.my}};
   }
 
-  /* ── 3. Halfway fold — snaps fold line to paper's centre ─ */
-  const deg=Math.atan2(dy,dx)*180/Math.PI;
-  const absD=Math.abs(deg);
-  const b=paperBounds();
-
-  // Near-horizontal drag → vertical fold line → snap x-position to midX
-  if (Math.min(absD,180-absD) < SNAP_DEG) {
-    const dest={x:2*b.mx-pa.x, y:pa.y};
-    if (Math.hypot(dest.x-pa.x,0) > 14)
-      return {point:dest, type:'halfway', label:'Fold in half', midLine:{axis:'x',val:b.mx}};
-  }
-  // Near-vertical drag → horizontal fold line → snap y-position to midY
-  if (Math.abs(absD-90) < SNAP_DEG) {
-    const dest={x:pa.x, y:2*b.my-pa.y};
-    if (Math.hypot(0,dest.y-pa.y) > 14)
-      return {point:dest, type:'halfway', label:'Fold in half', midLine:{axis:'y',val:b.my}};
-  }
-
-  /* ── 4. Diagonal angle snap (45 / 135°) ─────────────────── */
-  for (const a of [45,-45,135,-135]) {
-    if (Math.abs(((deg-a+540)%360)-180) < SNAP_DEG) {
+  // 4. Diagonal
+  for (const a of[45,-45,135,-135]) {
+    if(Math.abs(((deg-a+540)%360)-180)<SNAP_DEG){
       const r=a*Math.PI/180;
-      return {point:{x:pa.x+len*Math.cos(r),y:pa.y+len*Math.sin(r)}, type:'angle', label:'Diagonal fold'};
+      return{point:{x:pa.x+len*Math.cos(r),y:pa.y+len*Math.sin(r)},type:'angle',label:'Diagonal fold'};
     }
   }
-
   return null;
 }
 
 /* ── fold + undo ──────────────────────────────────────────── */
-function doFold(a, b) {
-  if (Math.hypot(b.x-a.x,b.y-a.y) < 14) return;
+function doFold(a,b) {
+  if (Math.hypot(b.x-a.x,b.y-a.y)<14) return;
   history.push(cloneLayers());
-  const L=perp(a,b);
-  const keep=[],folds=[];
+  const L=perp(a,b),keep=[],folds=[];
   for (const ly of layers) {
-    const sp=clip(ly.polygon,L,true), fp=clip(ly.polygon,L,false);
-    if (area(sp)>0.5) keep.push({polygon:sp,isFront:ly.isFront});
-    if (area(fp)>0.5) folds.push({polygon:reflPoly(fp,L),isFront:!ly.isFront});
+    const sp=clip(ly.polygon,L,true),fp=clip(ly.polygon,L,false);
+    if(area(sp)>0.5) keep.push({polygon:sp,isFront:ly.isFront});
+    if(area(fp)>0.5) folds.push({polygon:reflPoly(fp,L),isFront:!ly.isFront});
   }
   layers=[...keep,...folds.reverse()];
   syncUndoBtn();
@@ -321,17 +266,109 @@ function doFold(a, b) {
 }
 
 function doUndo() {
-  if (history.length===0) return;
-  layers=history.pop();
-  syncUndoBtn();
+  if (!history.length) return;
+  layers=history.pop(); syncUndoBtn(); render();
+}
+
+/* ── 3D view ──────────────────────────────────────────────── */
+function enterView() {
+  mode='view';
+  foldBtns.style.display='none';
+  backBtn.style.display='';
+  hintEl.textContent='Drag to rotate · Esc to go back';
+  subtitleEl.textContent='Drag to rotate in 3D';
+  cv.style.cursor='grab';
+  startAutoRotate();
+}
+
+function exitView() {
+  mode='fold';
+  stopAutoRotate();
+  viewDrag=false;
+  foldBtns.style.display='flex';
+  backBtn.style.display='none';
+  hintEl.textContent='Drag to fold · Ctrl+Z to undo · snaps to corners, edges & halves';
+  subtitleEl.textContent='Drag to fold · Snaps to edges, corners & midpoints';
+  cv.style.cursor='default';
+  drag=false; p0=p1=p1s=snap=hoverPt=null;
   render();
 }
 
-/* ── render ───────────────────────────────────────────────── */
-function drawPoly(poly, fill, stroke, lw) {
+function startAutoRotate() {
+  let lastT=null;
+  function frame(t) {
+    if (mode!=='view'||viewDrag){animId=null;return;}
+    if (lastT!==null) rotY+=(t-lastT)*0.00045;
+    lastT=t; render();
+    animId=requestAnimationFrame(frame);
+  }
+  animId=requestAnimationFrame(frame);
+}
+
+function stopAutoRotate() {
+  if (animId){cancelAnimationFrame(animId);animId=null;}
+}
+
+/* ── render3D ─────────────────────────────────────────────── */
+function render3D() {
+  cx.fillStyle='#18232e'; cx.fillRect(0,0,W,H);
+
+  // Subtle grid
+  cx.strokeStyle='rgba(160,200,240,0.05)'; cx.lineWidth=1;
+  for(let x=0;x<W;x+=50){cx.beginPath();cx.moveTo(x,0);cx.lineTo(x,H);cx.stroke();}
+  for(let y=0;y<H;y+=50){cx.beginPath();cx.moveTo(0,y);cx.lineTo(W,y);cx.stroke();}
+
+  const LAYER_Z=2, FOV=900, cX=W/2, cY=H/2, n=layers.length;
+  const cosX=Math.cos(rotX),sinX=Math.sin(rotX),cosY=Math.cos(rotY),sinY=Math.sin(rotY);
+
+  function rot(x,y,z) {
+    const x2=x*cosY+z*sinY, z2=-x*sinY+z*cosY;
+    const y3=y*cosX-z2*sinX, z3=y*sinX+z2*cosX;
+    return{x:x2,y:y3,z:z3};
+  }
+  function prj(v) { const s=FOV/(FOV+v.z); return{x:cX+v.x*s,y:cY+v.y*s,z:v.z}; }
+
+  // Directional lighting
+  const rn=rot(0,0,1), mag=Math.hypot(0.25,0.4,0.9);
+  const litF=0.55+0.45*Math.max(0,( rn.x*0.25+rn.y*-0.4+rn.z*0.9)/mag);
+  const litB=0.55+0.45*Math.max(0,(-rn.x*0.25-rn.y*-0.4-rn.z*0.9)/mag);
+
+  const built=layers.map((ly,i)=>{
+    const z0=(i-(n-1)/2)*LAYER_Z;
+    const verts=ly.polygon.map(p=>prj(rot(p.x-cX,p.y-cY,z0)));
+    const avgZ=verts.reduce((s,v)=>s+v.z,0)/verts.length;
+    return{ly,verts,avgZ};
+  }).sort((a,b)=>b.avgZ-a.avgZ);
+
+  // Soft drop shadow (offset silhouette)
+  if (built.length) {
+    cx.save(); cx.globalAlpha=0.18;
+    drawPoly(built[built.length-1].verts.map(v=>({x:v.x+10,y:v.y+13})),'#000',null);
+    cx.restore();
+  }
+
+  // Paper layers back-to-front
+  for (const{ly,verts}of built) {
+    const lit=ly.isFront?litF:litB;
+    const fill=ly.isFront
+      ?`rgb(${Math.round(254*lit)},${Math.round(253*lit)},${Math.round(248*lit)})`
+      :`rgb(${Math.round(237*lit)},${Math.round(227*lit)},${Math.round(203*lit)})`;
+    drawPoly(verts,fill,`rgba(155,135,105,${(0.5+0.3*lit).toFixed(2)})`,1);
+  }
+
+  // Hint
+  cx.save();
+  cx.fillStyle='rgba(180,210,240,0.32)';
+  cx.font='13px Segoe UI,sans-serif'; cx.textAlign='center';
+  cx.fillText('Drag to rotate · Esc to go back',cX,H-22);
+  cx.textAlign='start'; cx.restore();
+}
+
+/* ── render2D ─────────────────────────────────────────────── */
+function drawPoly(poly,fill,stroke,lw) {
   if (poly.length<3) return;
   cx.beginPath(); cx.moveTo(poly[0].x,poly[0].y);
-  for (let i=1; i<poly.length; i++) cx.lineTo(poly[i].x,poly[i].y);
+  for (let i=1;i<poly.length;i++) cx.lineTo(poly[i].x,poly[i].y);
   cx.closePath();
   if (fill)   {cx.fillStyle=fill;   cx.fill();}
   if (stroke) {cx.strokeStyle=stroke; cx.lineWidth=lw||1.5; cx.stroke();}
@@ -339,212 +376,193 @@ function drawPoly(poly, fill, stroke, lw) {
 
 function foldSeg(L) {
   let px,py;
-  if (Math.abs(L.B)>1e-8) {px=W/2; py=-(L.A*px+L.C)/L.B;}
-  else                     {py=H/2; px=-(L.B*py+L.C)/L.A;}
+  if(Math.abs(L.B)>1e-8){px=W/2;py=-(L.A*px+L.C)/L.B;}else{py=H/2;px=-(L.B*py+L.C)/L.A;}
   const mag=Math.hypot(L.A,L.B),dx=-L.B/mag,dy=L.A/mag;
-  return [{x:px-dx*900,y:py-dy*900},{x:px+dx*900,y:py+dy*900}];
+  return[{x:px-dx*900,y:py-dy*900},{x:px+dx*900,y:py+dy*900}];
 }
 
 function render() {
+  if (mode==='view') { render3D(); return; }
+
   cx.fillStyle='#ccdde4'; cx.fillRect(0,0,W,H);
-
-  // Dot grid
   cx.fillStyle='rgba(85,135,155,0.17)';
-  for (let x=30;x<W;x+=30) for (let y=30;y<H;y+=30) {
-    cx.beginPath(); cx.arc(x,y,1.3,0,Math.PI*2); cx.fill();
-  }
+  for(let x=30;x<W;x+=30) for(let y=30;y<H;y+=30){cx.beginPath();cx.arc(x,y,1.3,0,Math.PI*2);cx.fill();}
 
-  // Paper layers (bottom → top)
-  for (let i=0; i<layers.length; i++) {
-    const ly=layers[i], top=i===layers.length-1;
+  for(let i=0;i<layers.length;i++) {
+    const ly=layers[i],top=i===layers.length-1;
     cx.save();
-    if (top)  { cx.shadowColor='rgba(0,30,60,0.22)'; cx.shadowBlur=14; cx.shadowOffsetX=3; cx.shadowOffsetY=5; }
-    else if (i===0) { cx.shadowColor='rgba(0,30,60,0.18)'; cx.shadowBlur=20; cx.shadowOffsetX=5; cx.shadowOffsetY=8; }
-    drawPoly(ly.polygon, ly.isFront?(i===0?'#FEFEFE':'#F9F9F5'):'#EDE3CB', ly.isFront?'#d4c4a8':'#c8a870', top?1.5:1);
+    if(top){cx.shadowColor='rgba(0,30,60,0.22)';cx.shadowBlur=14;cx.shadowOffsetX=3;cx.shadowOffsetY=5;}
+    else if(i===0){cx.shadowColor='rgba(0,30,60,0.18)';cx.shadowBlur=20;cx.shadowOffsetX=5;cx.shadowOffsetY=8;}
+    drawPoly(ly.polygon,ly.isFront?(i===0?'#FEFEFE':'#F9F9F5'):'#EDE3CB',ly.isFront?'#d4c4a8':'#c8a870',top?1.5:1);
     cx.restore();
   }
 
   if (!drag) {
-    // ── Idle: midlines + snap-hint markers ─────────────────
     const b=paperBounds();
+    cx.save();cx.strokeStyle='rgba(25,155,60,0.22)';cx.lineWidth=1;cx.setLineDash([8,6]);
+    cx.beginPath();cx.moveTo(b.mx,b.y0);cx.lineTo(b.mx,b.y1);cx.stroke();
+    cx.beginPath();cx.moveTo(b.x0,b.my);cx.lineTo(b.x1,b.my);cx.stroke();
+    cx.setLineDash([]);cx.restore();
 
-    // Faint midlines showing where "fold in half" would land
-    cx.save();
-    cx.strokeStyle='rgba(25,155,60,0.22)'; cx.lineWidth=1; cx.setLineDash([8,6]);
-    cx.beginPath(); cx.moveTo(b.mx,b.y0); cx.lineTo(b.mx,b.y1); cx.stroke();
-    cx.beginPath(); cx.moveTo(b.x0,b.my); cx.lineTo(b.x1,b.my); cx.stroke();
-    cx.setLineDash([]);
-    cx.restore();
-
-    // Corner rings (orange) and midpoint dots (blue)
     for (const pt of snapPts()) {
       const corner=pt.type==='corner';
       cx.save();
       cx.strokeStyle=corner?'rgba(204,68,0,0.45)':'rgba(26,68,204,0.4)';
       cx.fillStyle  =corner?'rgba(204,68,0,0.12)':'rgba(26,68,204,0.1)';
-      cx.lineWidth=1.5;
-      cx.beginPath(); cx.arc(pt.x,pt.y,corner?7:5.5,0,Math.PI*2);
-      cx.fill(); cx.stroke();
+      cx.lineWidth=1.5; cx.beginPath(); cx.arc(pt.x,pt.y,corner?7:5.5,0,Math.PI*2); cx.fill(); cx.stroke();
       cx.restore();
     }
 
-    // Hover highlight: vivid ring on the snap point that would be grabbed on click
     if (hoverPt) {
       const col=hoverPt.type==='corner'?'#cc4400':'#1a44cc';
       cx.save();
       cx.strokeStyle=col; cx.fillStyle=col+'25'; cx.lineWidth=2.5;
       cx.beginPath(); cx.arc(hoverPt.x,hoverPt.y,12,0,Math.PI*2); cx.fill(); cx.stroke();
       cx.fillStyle=col; cx.beginPath(); cx.arc(hoverPt.x,hoverPt.y,3.5,0,Math.PI*2); cx.fill();
-      // Small label
-      cx.font='bold 11px Segoe UI, sans-serif';
-      const lbl=hoverPt.type==='corner'?'Corner':'Midpoint';
-      const tw=cx.measureText(lbl).width;
-      cx.fillStyle=col;
-      cx.beginPath(); cx.roundRect(hoverPt.x+15,hoverPt.y-19,tw+10,18,3); cx.fill();
+      cx.font='bold 11px Segoe UI,sans-serif';
+      const lbl=hoverPt.type==='corner'?'Corner':'Midpoint',tw=cx.measureText(lbl).width;
+      cx.fillStyle=col; cx.beginPath(); cx.roundRect(hoverPt.x+15,hoverPt.y-19,tw+10,18,3); cx.fill();
       cx.fillStyle='#fff'; cx.fillText(lbl,hoverPt.x+20,hoverPt.y-5);
       cx.restore();
     }
     return;
   }
 
-  // ── Drag preview ───────────────────────────────────────────
   const cur=p1s||p1;
   if (!p0||!cur) return;
-  const dist=Math.hypot(cur.x-p0.x,cur.y-p0.y);
-  if (dist<8) return;
+  if (Math.hypot(cur.x-p0.x,cur.y-p0.y)<8) return;
 
-  const L   = perp(p0,cur);
-  const col = snapCol();
+  const L=perp(p0,cur), col=snapCol();
 
-  // Ghost
   cx.save(); cx.globalAlpha=0.3;
-  for (const ly of layers) {
-    const fp=clip(ly.polygon,L,false);
-    if (fp.length>=3) drawPoly(reflPoly(fp,L),ly.isFront?'#60a8ff':'#ffaa58',null);
-  }
+  for(const ly of layers){const fp=clip(ly.polygon,L,false);if(fp.length>=3)drawPoly(reflPoly(fp,L),ly.isFront?'#60a8ff':'#ffaa58',null);}
   cx.restore();
 
-  // Halfway-fold guide line (drawn before the dashed fold line)
   if (snap?.midLine) {
-    const {axis,val}=snap.midLine;
-    cx.save();
-    cx.strokeStyle='rgba(25,155,60,0.55)'; cx.lineWidth=1.5; cx.setLineDash([6,4]);
-    cx.beginPath();
-    if (axis==='x') {cx.moveTo(val,0); cx.lineTo(val,H);}
-    else             {cx.moveTo(0,val); cx.lineTo(W,val);}
-    cx.stroke(); cx.setLineDash([]);
-    cx.restore();
+    const{axis,val}=snap.midLine;
+    cx.save(); cx.strokeStyle='rgba(25,155,60,0.55)'; cx.lineWidth=1.5; cx.setLineDash([6,4]);
+    cx.beginPath(); if(axis==='x'){cx.moveTo(val,0);cx.lineTo(val,H);}else{cx.moveTo(0,val);cx.lineTo(W,val);}
+    cx.stroke(); cx.setLineDash([]); cx.restore();
   }
 
-  // Dashed fold line — thicker + coloured when snapped
   const seg=foldSeg(L);
-  cx.save();
-  cx.strokeStyle=col; cx.lineWidth=snap?2.5:2; cx.setLineDash([10,6]);
-  cx.beginPath(); cx.moveTo(seg[0].x,seg[0].y); cx.lineTo(seg[1].x,seg[1].y);
-  cx.stroke(); cx.setLineDash([]);
-  cx.restore();
+  cx.save(); cx.strokeStyle=col; cx.lineWidth=snap?2.5:2; cx.setLineDash([10,6]);
+  cx.beginPath(); cx.moveTo(seg[0].x,seg[0].y); cx.lineTo(seg[1].x,seg[1].y); cx.stroke(); cx.setLineDash([]); cx.restore();
 
-  // Grab-point marker at p0
-  cx.save();
-  cx.fillStyle=col+'55'; cx.strokeStyle=col; cx.lineWidth=2;
+  // Grab-point dot at p0
+  cx.save(); cx.fillStyle=col+'55'; cx.strokeStyle=col; cx.lineWidth=2;
   cx.beginPath(); cx.arc(p0.x,p0.y,7,0,Math.PI*2); cx.fill(); cx.stroke();
-  cx.fillStyle=col; cx.beginPath(); cx.arc(p0.x,p0.y,3,0,Math.PI*2); cx.fill();
-  cx.restore();
+  cx.fillStyle=col; cx.beginPath(); cx.arc(p0.x,p0.y,3,0,Math.PI*2); cx.fill(); cx.restore();
 
-  // Drag arrow
   const ang=Math.atan2(cur.y-p0.y,cur.x-p0.x);
-  cx.save();
-  cx.strokeStyle=col; cx.fillStyle=col; cx.lineWidth=2;
+  cx.save(); cx.strokeStyle=col; cx.fillStyle=col; cx.lineWidth=2;
   cx.beginPath(); cx.moveTo(p0.x,p0.y); cx.lineTo(cur.x,cur.y); cx.stroke();
   cx.beginPath();
   cx.moveTo(cur.x,cur.y);
   cx.lineTo(cur.x-13*Math.cos(ang-0.42),cur.y-13*Math.sin(ang-0.42));
   cx.lineTo(cur.x-13*Math.cos(ang+0.42),cur.y-13*Math.sin(ang+0.42));
-  cx.closePath(); cx.fill();
-  cx.restore();
+  cx.closePath(); cx.fill(); cx.restore();
 
-  // Snap ring + inner dot at the snapped target (for point/edge snaps)
   if (snap?.snapPt) {
-    const {x,y}=snap.snapPt;
-    cx.save();
-    cx.strokeStyle=col; cx.fillStyle=col+'28'; cx.lineWidth=2.5;
+    const{x,y}=snap.snapPt;
+    cx.save(); cx.strokeStyle=col; cx.fillStyle=col+'28'; cx.lineWidth=2.5;
     cx.beginPath(); cx.arc(x,y,12,0,Math.PI*2); cx.fill(); cx.stroke();
-    cx.fillStyle=col; cx.beginPath(); cx.arc(x,y,3.5,0,Math.PI*2); cx.fill();
-    cx.restore();
+    cx.fillStyle=col; cx.beginPath(); cx.arc(x,y,3.5,0,Math.PI*2); cx.fill(); cx.restore();
   }
 
-  // Snap label badge
   if (snap?.label) {
-    cx.save();
-    cx.font='bold 12px Segoe UI, sans-serif';
-    const tw=cx.measureText(snap.label).width, lx=cur.x+16, ly2=cur.y-12;
-    cx.fillStyle=col;
-    cx.beginPath(); cx.roundRect(lx-5,ly2-13,tw+10,20,4); cx.fill();
-    cx.fillStyle='#fff'; cx.fillText(snap.label,lx,ly2);
-    cx.restore();
+    cx.save(); cx.font='bold 12px Segoe UI,sans-serif';
+    const tw=cx.measureText(snap.label).width,lx=cur.x+16,ly2=cur.y-12;
+    cx.fillStyle=col; cx.beginPath(); cx.roundRect(lx-5,ly2-13,tw+10,20,4); cx.fill();
+    cx.fillStyle='#fff'; cx.fillText(snap.label,lx,ly2); cx.restore();
   }
 }
 
 /* ── input ────────────────────────────────────────────────── */
 function pos(e) {
-  const r=cv.getBoundingClientRect(), sx=W/r.width, sy=H/r.height;
+  const r=cv.getBoundingClientRect(),sx=W/r.width,sy=H/r.height;
   const s=e.touches?e.touches[0]:e;
-  return {x:(s.clientX-r.left)*sx,y:(s.clientY-r.top)*sy};
+  return{x:(s.clientX-r.left)*sx,y:(s.clientY-r.top)*sy};
 }
 
 function updateSnap() { snap=applySnap(p0,p1); p1s=snap?snap.point:p1; }
 
-cv.addEventListener('mousedown', e=>{
-  const rawP=pos(e);
-  const start=snapStart(rawP);
-  // Allow drag if cursor is on paper, or right on top of a snap point (±8px)
-  if (!onPaper(rawP) && !(start.snapped && start.dist < 8)) return;
+cv.addEventListener('mousedown',e=>{
+  if (mode==='view') {
+    stopAutoRotate(); viewDrag=true; vp0=pos(e); cv.style.cursor='grabbing';
+    return;
+  }
+  const rawP=pos(e),start=snapStart(rawP);
+  if (!onPaper(rawP)&&!(start.snapped&&start.dist<8)) return;
   drag=true; p0={x:start.x,y:start.y}; p1=p0; p1s=p0; snap=hoverPt=null;
   cv.style.cursor='grabbing';
 });
-cv.addEventListener('mousemove', e=>{
+
+cv.addEventListener('mousemove',e=>{
+  if (mode==='view') {
+    if (!viewDrag) return;
+    const p=pos(e);
+    rotY+=(p.x-vp0.x)*0.007; rotX+=(p.y-vp0.y)*0.007;
+    rotX=Math.max(-Math.PI/2+0.05,Math.min(Math.PI/2-0.05,rotX));
+    vp0=p; render(); return;
+  }
   const p=pos(e);
   if (!drag) {
     cv.style.cursor=onPaper(p)?'grab':'default';
-    // Track nearest snap point so render() can draw the hover highlight
-    const pts=snapPts(); let best=null, bestD=SNAP_PX;
-    for (const pt of pts) { const d=Math.hypot(p.x-pt.x,p.y-pt.y); if(d<bestD){bestD=d;best=pt;} }
-    hoverPt=best;
-    render();
-    return;
+    const pts=snapPts(); let best=null,bestD=SNAP_PX;
+    for(const pt of pts){const d=Math.hypot(p.x-pt.x,p.y-pt.y);if(d<bestD){bestD=d;best=pt;}}
+    hoverPt=best; render(); return;
   }
   p1=p; updateSnap(); render();
 });
-cv.addEventListener('mouseup', e=>{
+
+cv.addEventListener('mouseup',e=>{
+  if (mode==='view') { viewDrag=false; cv.style.cursor='grab'; return; }
   if (!drag) return;
   p1=pos(e); updateSnap(); doFold(p0,p1s);
   drag=false; p0=p1=p1s=snap=null; cv.style.cursor='grab';
 });
+
 cv.addEventListener('mouseleave',()=>{
+  if (mode==='view') { viewDrag=false; return; }
   hoverPt=null;
-  if (drag) {drag=false; p0=p1=p1s=snap=null;}
+  if (drag){drag=false;p0=p1=p1s=snap=null;}
   render();
 });
+
 cv.addEventListener('touchstart',e=>{
   e.preventDefault();
-  const rawP=pos(e);
-  const start=snapStart(rawP);
-  if (!onPaper(rawP) && !(start.snapped && start.dist < 8)) return;
+  if (mode==='view'){stopAutoRotate();viewDrag=true;vp0=pos(e);return;}
+  const rawP=pos(e),start=snapStart(rawP);
+  if (!onPaper(rawP)&&!(start.snapped&&start.dist<8)) return;
   drag=true; p0={x:start.x,y:start.y}; p1=p0; p1s=p0; snap=hoverPt=null;
 },{passive:false});
+
 cv.addEventListener('touchmove',e=>{
-  e.preventDefault(); if(!drag) return;
-  p1=pos(e); updateSnap(); render();
-},{passive:false});
-cv.addEventListener('touchend',e=>{
-  e.preventDefault(); if(!drag) return;
-  updateSnap(); doFold(p0,p1s); drag=false; p0=p1=p1s=snap=null;
+  e.preventDefault();
+  if (mode==='view'){
+    if(!viewDrag)return;
+    const p=pos(e);
+    rotY+=(p.x-vp0.x)*0.007; rotX+=(p.y-vp0.y)*0.007;
+    rotX=Math.max(-Math.PI/2+0.05,Math.min(Math.PI/2-0.05,rotX));
+    vp0=p; render(); return;
+  }
+  if(!drag)return; p1=pos(e); updateSnap(); render();
 },{passive:false});
 
-undoBtn.addEventListener('click', doUndo);
-document.getElementById('restart').addEventListener('click',()=>{ init(); cv.style.cursor='default'; });
+cv.addEventListener('touchend',e=>{
+  e.preventDefault();
+  if(mode==='view'){viewDrag=false;return;}
+  if(!drag)return; updateSnap(); doFold(p0,p1s); drag=false; p0=p1=p1s=snap=null;
+},{passive:false});
+
+undoBtn.addEventListener('click',doUndo);
+document.getElementById('restart').addEventListener('click',()=>{init();cv.style.cursor='default';});
+document.getElementById('view3d').addEventListener('click',enterView);
+document.getElementById('back-fold').addEventListener('click',exitView);
 document.addEventListener('keydown',e=>{
-  if ((e.ctrlKey||e.metaKey)&&e.key==='z') {e.preventDefault(); doUndo();}
+  if((e.ctrlKey||e.metaKey)&&e.key==='z'){e.preventDefault();doUndo();}
+  if(e.key==='Escape'&&mode==='view') exitView();
 });
 
 init();
