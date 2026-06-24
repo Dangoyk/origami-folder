@@ -96,7 +96,7 @@
   <span class="hint">Drag to fold · Ctrl+Z to undo · snaps to corners, edges &amp; halves</span>
 </div>
 
-<div class="ver">v1.2.0</div>
+<div class="ver">v1.2.1</div>
 
 <script>
 const cv = document.getElementById('c');
@@ -110,7 +110,7 @@ const OY = (H - PS) / 2;
 let layers  = [];
 let history = [];  // undo stack — each entry is a deep-cloned layers array
 let drag    = false;
-let p0 = null, p1 = null, p1s = null, snap = null;
+let p0 = null, p1 = null, p1s = null, snap = null, hoverPt = null;
 
 const undoBtn = document.getElementById('undo');
 
@@ -121,7 +121,7 @@ function init() {
     isFront: true
   }];
   history = [];
-  drag = false; p0 = p1 = p1s = snap = null;
+  drag = false; p0 = p1 = p1s = snap = hoverPt = null;
   syncUndoBtn();
   render();
 }
@@ -214,6 +214,19 @@ function closestOnSeg(p, a, b) {
   return {x:a.x+t*dx,y:a.y+t*dy};
 }
 
+// Snap the drag START point to the nearest corner/midpoint.
+// Returns {x, y, snapped, dist} — snapped=true means p0 was locked to a snap target.
+function snapStart(rawP) {
+  const pts=snapPts();
+  let best=null, bestD=SNAP_PX;
+  for (const pt of pts) {
+    const d=Math.hypot(rawP.x-pt.x,rawP.y-pt.y);
+    if (d<bestD) { bestD=d; best=pt; }
+  }
+  if (best) return {x:best.x, y:best.y, snapped:true,  dist:bestD, snapPt:best};
+  return       {x:rawP.x,  y:rawP.y,  snapped:false, dist:Infinity, snapPt:null};
+}
+
 // Per-type accent colours for fold line, arrow, badge, and indicator rings
 const SNAP_COLORS = {
   corner:  '#cc4400',
@@ -240,7 +253,7 @@ function applySnap(pa, pb) {
   }
   if (best) {
     // Detect corner-to-corner when drag starts at a corner too
-    const fromCorner = pts.some(p=>p.type==='corner' && Math.hypot(pa.x-p.x,pa.y-p.y)<14);
+    const fromCorner = pts.some(p=>p.type==='corner' && Math.hypot(pa.x-p.x,pa.y-p.y)<2);
     const label = (fromCorner && best.type==='corner') ? 'Corner to corner'
                 : best.type==='corner' ? 'Fold to corner' : 'Edge midpoint';
     return {point:{x:best.x,y:best.y}, type:best.type, label, snapPt:best};
@@ -374,6 +387,23 @@ function render() {
       cx.fill(); cx.stroke();
       cx.restore();
     }
+
+    // Hover highlight: vivid ring on the snap point that would be grabbed on click
+    if (hoverPt) {
+      const col=hoverPt.type==='corner'?'#cc4400':'#1a44cc';
+      cx.save();
+      cx.strokeStyle=col; cx.fillStyle=col+'25'; cx.lineWidth=2.5;
+      cx.beginPath(); cx.arc(hoverPt.x,hoverPt.y,12,0,Math.PI*2); cx.fill(); cx.stroke();
+      cx.fillStyle=col; cx.beginPath(); cx.arc(hoverPt.x,hoverPt.y,3.5,0,Math.PI*2); cx.fill();
+      // Small label
+      cx.font='bold 11px Segoe UI, sans-serif';
+      const lbl=hoverPt.type==='corner'?'Corner':'Midpoint';
+      const tw=cx.measureText(lbl).width;
+      cx.fillStyle=col;
+      cx.beginPath(); cx.roundRect(hoverPt.x+15,hoverPt.y-19,tw+10,18,3); cx.fill();
+      cx.fillStyle='#fff'; cx.fillText(lbl,hoverPt.x+20,hoverPt.y-5);
+      cx.restore();
+    }
     return;
   }
 
@@ -412,6 +442,13 @@ function render() {
   cx.strokeStyle=col; cx.lineWidth=snap?2.5:2; cx.setLineDash([10,6]);
   cx.beginPath(); cx.moveTo(seg[0].x,seg[0].y); cx.lineTo(seg[1].x,seg[1].y);
   cx.stroke(); cx.setLineDash([]);
+  cx.restore();
+
+  // Grab-point marker at p0
+  cx.save();
+  cx.fillStyle=col+'55'; cx.strokeStyle=col; cx.lineWidth=2;
+  cx.beginPath(); cx.arc(p0.x,p0.y,7,0,Math.PI*2); cx.fill(); cx.stroke();
+  cx.fillStyle=col; cx.beginPath(); cx.arc(p0.x,p0.y,3,0,Math.PI*2); cx.fill();
   cx.restore();
 
   // Drag arrow
@@ -458,12 +495,24 @@ function pos(e) {
 function updateSnap() { snap=applySnap(p0,p1); p1s=snap?snap.point:p1; }
 
 cv.addEventListener('mousedown', e=>{
-  const p=pos(e); if(!onPaper(p)) return;
-  drag=true; p0=p; p1=p; p1s=p; snap=null; cv.style.cursor='grabbing';
+  const rawP=pos(e);
+  const start=snapStart(rawP);
+  // Allow drag if cursor is on paper, or right on top of a snap point (±8px)
+  if (!onPaper(rawP) && !(start.snapped && start.dist < 8)) return;
+  drag=true; p0={x:start.x,y:start.y}; p1=p0; p1s=p0; snap=hoverPt=null;
+  cv.style.cursor='grabbing';
 });
 cv.addEventListener('mousemove', e=>{
   const p=pos(e);
-  if (!drag) {cv.style.cursor=onPaper(p)?'grab':'default'; return;}
+  if (!drag) {
+    cv.style.cursor=onPaper(p)?'grab':'default';
+    // Track nearest snap point so render() can draw the hover highlight
+    const pts=snapPts(); let best=null, bestD=SNAP_PX;
+    for (const pt of pts) { const d=Math.hypot(p.x-pt.x,p.y-pt.y); if(d<bestD){bestD=d;best=pt;} }
+    hoverPt=best;
+    render();
+    return;
+  }
   p1=p; updateSnap(); render();
 });
 cv.addEventListener('mouseup', e=>{
@@ -472,11 +521,16 @@ cv.addEventListener('mouseup', e=>{
   drag=false; p0=p1=p1s=snap=null; cv.style.cursor='grab';
 });
 cv.addEventListener('mouseleave',()=>{
-  if (drag) {drag=false; p0=p1=p1s=snap=null; render();}
+  hoverPt=null;
+  if (drag) {drag=false; p0=p1=p1s=snap=null;}
+  render();
 });
 cv.addEventListener('touchstart',e=>{
-  e.preventDefault(); const p=pos(e); if(!onPaper(p)) return;
-  drag=true; p0=p; p1=p; p1s=p; snap=null;
+  e.preventDefault();
+  const rawP=pos(e);
+  const start=snapStart(rawP);
+  if (!onPaper(rawP) && !(start.snapped && start.dist < 8)) return;
+  drag=true; p0={x:start.x,y:start.y}; p1=p0; p1s=p0; snap=hoverPt=null;
 },{passive:false});
 cv.addEventListener('touchmove',e=>{
   e.preventDefault(); if(!drag) return;
