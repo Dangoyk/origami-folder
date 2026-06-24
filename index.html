@@ -90,7 +90,7 @@
   <span class="hint" id="hint">Drag to fold · Right-click to mark crease · Ctrl+Z to undo</span>
 </div>
 
-<div class="ver">v1.4.0</div>
+<div class="ver">v1.4.1</div>
 
 <script>
 const cv = document.getElementById('c');
@@ -279,7 +279,7 @@ function snapStart(rawP){
   return{x:rawP.x,y:rawP.y,snapped:false,dist:Infinity,snapPt:null};
 }
 
-const SNAP_COLORS={corner:'#cc4400',mid:'#1a44cc',edge:'#007a6e',halfway:'#1a9940',angle:'#8822cc',crease:'#7733aa','crease-mid':'#7733aa',default:'#1437b4'};
+const SNAP_COLORS={corner:'#cc4400',mid:'#1a44cc',edge:'#007a6e',halfway:'#1a9940',angle:'#8822cc',crease:'#7733aa','crease-mid':'#7733aa',foldthrough:'#1a5aaa',default:'#1437b4'};
 function snapCol(){return SNAP_COLORS[snap?.type]??SNAP_COLORS.default;}
 
 function applySnap(pa,pb){
@@ -312,7 +312,33 @@ function applySnap(pa,pb){
   }
   if(bestEP)return{point:bestEP,type:'edge',label:'Fold to edge'};
 
-  // 3. Halfway fold
+  // 3. Fold-line-through-point snap
+  // Activation: distance from current fold line to a notable point < threshold.
+  // Result: keep same drag direction but adjust magnitude so fold line hits that point exactly.
+  {
+    const Lc=perp(pa,pb), lineLen=Math.sqrt(Lc.A*Lc.A+Lc.B*Lc.B);
+    const ftDX=pb.x-pa.x,ftDY=pb.y-pa.y,ftLen=Math.hypot(ftDX,ftDY);
+    if(lineLen>1e-9&&ftLen>=1){
+      const ftDirX=ftDX/ftLen,ftDirY=ftDY/ftLen;
+      let bestFTP=null,bestFTDist=25; // px threshold: fold line within 25px of notable point
+      for(const pt of pts){
+        const distToLine=Math.abs(lv(Lc,pt))/lineLen;
+        if(distToLine<bestFTDist){
+          const t=2*((pt.x-pa.x)*ftDirX+(pt.y-pa.y)*ftDirY);
+          if(t<14)continue; // must be a meaningful forward fold
+          bestFTDist=distToLine; bestFTP={pt,t};
+        }
+      }
+      if(bestFTP){
+        const{pt,t}=bestFTP;
+        const snap1={x:pa.x+t*ftDirX,y:pa.y+t*ftDirY};
+        const typeLbl=pt.type==='corner'?'corner':pt.type.startsWith('crease')?'crease':'midpoint';
+        return{point:snap1,type:'foldthrough',label:`Through ${typeLbl}`,snapPt:pt};
+      }
+    }
+  }
+
+  // 4. Halfway fold
   const deg=Math.atan2(dy,dx)*180/Math.PI,absD=Math.abs(deg),b=paperBounds();
   if(Math.min(absD,180-absD)<SNAP_DEG){
     const dest={x:2*b.mx-pa.x,y:pa.y};
@@ -323,7 +349,7 @@ function applySnap(pa,pb){
     if(Math.abs(dest.y-pa.y)>14)return{point:dest,type:'halfway',label:'Fold in half',midLine:{axis:'y',val:b.my}};
   }
 
-  // 4. Diagonal
+  // 5. Diagonal
   for(const a of[45,-45,135,-135]){
     if(Math.abs(((deg-a+540)%360)-180)<SNAP_DEG){
       const r=a*Math.PI/180;
